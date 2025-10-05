@@ -1,0 +1,174 @@
+// Voice-control: ESP32 built-in Bluetooth (SPP) + HC-05 UART fallback
+#include <BluetoothSerial.h>
+
+BluetoothSerial SerialBT;        // built-in BT SPP
+HardwareSerial SerialHC(2);     // UART2 for HC-05 fallback
+
+// Motor pins (your current working mapping)
+const int ENA = 14;
+const int IN1 = 26;
+const int IN2 = 27;
+
+const int ENB = 13;
+const int IN3 = 25;
+const int IN4 = 33;
+
+// PWM setup (ESP32 LEDC)
+const int PWM_FREQ = 2000;
+const int PWM_RES = 8;     // 8-bit resolution 0..255
+const int CH_A = 0;
+const int CH_B = 1;
+int speedVal = 220;        // default speed (0-255)
+
+// HC-05 UART pins (fallback)
+const int HC_RX = 16; // connect HC-05 TX -> ESP32 RX (HC_RX)
+const int HC_TX = 17; // connect HC-05 RX <- ESP32 TX (HC_TX)
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  // Start built-in Bluetooth (SPP)
+  if (SerialBT.begin("ESP32-Car")) {
+    Serial.println("Built-in Bluetooth started: ESP32-Car");
+  } else {
+    Serial.println("Failed to start built-in Bluetooth.");
+  }
+
+  // Start UART for HC-05 fallback (9600 is typical HC-05 default)
+  SerialHC.begin(9600, SERIAL_8N1, HC_RX, HC_TX);
+  Serial.println("HC-05 UART (fallback) started on RX=16 TX=17");
+
+  // Motor pins
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+
+  // PWM enable pins
+  ledcSetup(CH_A, PWM_FREQ, PWM_RES);
+  ledcAttachPin(ENA, CH_A);
+
+  ledcSetup(CH_B, PWM_FREQ, PWM_RES);
+  ledcAttachPin(ENB, CH_B);
+
+  // Make sure motors are off at boot
+  stopMotors();
+  Serial.println("Ready. Say 'forward', 'backward', 'left', 'right' or 'stop'.");
+}
+
+void loop() {
+  String cmd = "";
+  int source = 0; // 1 = built-in BT, 2 = HC-05 UART
+
+  if (SerialBT.available()) {
+    cmd = SerialBT.readStringUntil('\n');
+    source = 1;
+  } else if (SerialHC.available()) {
+    cmd = SerialHC.readStringUntil('\n');
+    source = 2;
+  }
+
+  if (cmd.length() > 0) {
+    cmd.trim();
+    cmd.toLowerCase();
+    Serial.printf("Command(%d): %s\n", source, cmd.c_str());
+
+    // interpret words (robust: checks substrings)
+    if (cmd.indexOf("forward") >= 0 || cmd.indexOf("forw") >= 0 || cmd == "f" || cmd.indexOf("go") >= 0 || cmd.indexOf("ahead") >= 0) {
+      forward();
+      sendAck(source, "forward");
+    } else if (cmd.indexOf("back") >= 0 || cmd.indexOf("reverse") >= 0 || cmd == "b") {
+      backward();
+      sendAck(source, "backward");
+    } else if (cmd.indexOf("left") >= 0 || cmd == "l") {
+      left();
+      sendAck(source, "left");
+    } else if (cmd.indexOf("right") >= 0 || cmd == "r") {
+      right();
+      sendAck(source, "right");
+    } else if (cmd.indexOf("stop") >= 0 || cmd.indexOf("halt") >= 0 || cmd == "s") {
+      stopMotors();
+      sendAck(source, "stop");
+    } else if (cmd.indexOf("speed") >= 0) {
+      // optional: "speed 180" -> set pwm
+      int n = parseNumber(cmd);
+      if (n > 0 && n <= 255) {
+        speedVal = n;
+        sendAck(source, String("speed ") + String(speedVal));
+      } else {
+        sendAck(source, "invalid speed");
+      }
+    } else {
+      // unknown command
+      sendAck(source, "unknown");
+    }
+  }
+}
+
+// --- helpers ---
+void forward() {
+  // left forward, right forward
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  ledcWrite(CH_A, speedVal);
+  ledcWrite(CH_B, speedVal);
+}
+
+void backward() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  ledcWrite(CH_A, speedVal);
+  ledcWrite(CH_B, speedVal);
+}
+
+void left() {
+  // rotate/turn left: left backward, right forward
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  ledcWrite(CH_A, speedVal);
+  ledcWrite(CH_B, speedVal);
+}
+
+void right() {
+  // rotate/turn right: left forward, right backward
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  ledcWrite(CH_A, speedVal);
+  ledcWrite(CH_B, speedVal);
+}
+
+void stopMotors() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  ledcWrite(CH_A, 0);
+  ledcWrite(CH_B, 0);
+}
+
+void sendAck(int source, String msg) {
+  if (source == 1) {
+    SerialBT.println(msg);
+  } else if (source == 2) {
+    SerialHC.println(msg);
+  }
+  Serial.println("ACK -> " + msg);
+}
+
+int parseNumber(String &s) {
+  // find a number in the string (simple)
+  for (int i = 0; i < s.length(); ++i) {
+    if (isDigit(s[i])) {
+      int val = s.substring(i).toInt();
+      return val;
+    }
+  }
+  return -1;
+}
